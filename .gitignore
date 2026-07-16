@@ -4,3 +4,6 @@ __pycache__/
 .venv/
 venv/
 .streamlit/secrets.toml
+.superpowers/
+.claude/scheduled_tasks.lock
+.claude/settings.local.json
