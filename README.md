@@ -6,8 +6,9 @@ in a clinical trial, using per-sample cell counts for five immune populations
 
 The project loads `cell-count.csv` into a normalized SQLite database, computes
 relative cell-population frequencies, runs a responder-vs-non-responder
-statistical comparison, explores a baseline treatment subset, and surfaces
-everything in an interactive Streamlit dashboard.
+statistical comparison, explores a baseline treatment subset, and presents the
+results across a three-tab, report-style Streamlit dashboard (one tab per
+instruction part).
 
 ### Instructions
 
@@ -16,7 +17,7 @@ We are graded via GitHub Codespaces using the `Makefile` targets below.
 ```bash
 make setup      # install all dependencies (from requirements.txt)
 make pipeline   # build DB, load data, generate all output tables + plots
-make dashboard  # start the local server for the interactive dashboard
+make dashboard  # start the local dashboard server
 ```
 
 - `make setup` — installs all Python dependencies.
@@ -93,8 +94,11 @@ analytics:
 ├── pipeline.py         # runs load + all analyses, writes outputs/
 ├── Makefile            # setup / pipeline / dashboard targets
 ├── requirements.txt
+├── conftest.py         # puts repo root on sys.path for the test suite
 ├── cell-count.csv      # input data
 ├── cell_counts.db      # generated SQLite database (git-ignored)
+├── .streamlit/
+│   └── config.toml     # dashboard theme
 ├── db/
 │   ├── schema.sql      # table definitions (DDL)
 │   └── connection.py   # get_connection() helper
@@ -103,10 +107,16 @@ analytics:
 │   ├── comparison.py   # Part 3: responder vs non-responder stats + boxplots
 │   ├── subsets.py      # Part 4: baseline subset queries + breakdown counts
 │   └── questions.py    # the final computed answer
-├── outputs/            # generated tables (.csv) and plots (.png/.html)
-├── dashboard/
-│   └── app.py          # Streamlit dashboard
-└── tests/              # unit tests over the analysis functions
+├── outputs/            # generated tables (.csv) and the boxplot (.html)
+├── dashboard/          # Streamlit render layer (report style)
+│   ├── app.py          # entry point: theme, sidebar, three part-named tabs
+│   ├── data.py         # cached, self-building DB connection + cached analysis wrappers
+│   ├── components.py   # palette, KPI tiles, table styling, plain-language finding
+│   └── sections/       # one report per instruction part
+│       ├── part2.py    # cell-type frequencies
+│       ├── part3.py    # statistical analysis (paper style)
+│       └── part4.py    # subset analysis + degenerate-subset coverage
+└── tests/              # unit tests + a Streamlit AppTest smoke test
 ```
 
 The codebase separates three concerns so each can be developed and tested
@@ -117,14 +127,15 @@ independently:
   figure). It never prints, writes files, or imports Streamlit.
 - **Persist** (`pipeline.py`) — calls the analysis functions and writes their
   results to `outputs/`, the reproducible artifacts produced by `make pipeline`.
-- **Render** (`dashboard/app.py`) — calls the *same* analysis functions live
-  (cached with `@st.cache_data`) and displays them.
+- **Render** (`dashboard/`) — calls the *same* analysis functions (cached with
+  `@st.cache_data`) and displays them across three report-style tabs, one per
+  instruction part.
 
 Because the pipeline and the dashboard are two thin consumers of one analysis
 library, the numbers on screen are byte-identical to the generated artifacts —
-there is no second implementation of any calculation to drift out of sync, and
-the dashboard gains interactivity for free by passing different filter arguments
-to the same functions.
+there is no second implementation of any calculation to drift out of sync. The
+dashboard also self-builds the database from `cell-count.csv` on first load
+(caching the connection), so it runs on a fresh clone without `make pipeline`.
 
 **Analysis performed:**
 
@@ -133,13 +144,38 @@ to the same functions.
   `sample, total_count, population, count, percentage`.
 - **Part 3 — Statistical analysis:** compares population relative frequencies
   between responders and non-responders among **melanoma + miraclib + PBMC**
-  samples, using a mixed-effects model (`frequency ~ response + (1 | subject)`)
-  that respects repeated timepoints per subject, cross-checked with Mann-Whitney
-  U tests corrected for multiple comparisons (Benjamini-Hochberg FDR), reported
-  alongside per-population boxplots.
+  samples. The primary test is a linear mixed-effects model
+  (`percentage ~ response + C(time)`, random intercept per subject) that uses all
+  timepoints while respecting the repeated measures; where the between-subject
+  variance is ~0 it reduces to — and is computed as — OLS. It is cross-checked
+  with a Mann-Whitney U test on per-subject means, with Benjamini-Hochberg FDR
+  correction across the five populations and bootstrap 95% CIs for effect sizes,
+  reported alongside per-population boxplots. A population is a *candidate* if
+  significant under the mixed model, and *confirmed* only if also significant
+  under the non-parametric cross-check.
 - **Part 4 — Subset analysis:** melanoma PBMC samples at baseline
   (`time_from_treatment_start = 0`) from miraclib-treated patients, broken down
   by project, by responder/non-responder, and by sex.
+
+**Why this statistical design.** Each choice guards a specific threat to validity:
+
+- *Mixed-effects model (primary).* Each subject contributes three timepoints, so
+  the samples are not independent; treating them as independent
+  (pseudoreplication) would understate standard errors and inflate false
+  positives. A per-subject random intercept models that within-subject
+  correlation, so the responder effect is judged against the number of subjects,
+  not samples.
+- *Mann-Whitney U on per-subject means (cross-check).* Collapsing each subject to
+  one value restores independence, and the rank-based test assumes no normality —
+  robust to the skew of bounded [0, 100] frequencies. Agreement between the
+  parametric and non-parametric routes is the basis of the candidate/confirmed
+  rule.
+- *Benjamini-Hochberg FDR.* Five populations are tested at once; without
+  correction the chance of at least one spurious hit is ~23%. FDR controls that
+  while keeping more power than Bonferroni.
+- *Bootstrap 95% CIs.* A p-value says whether an effect is distinguishable from
+  zero, not whether it is large enough to matter; the CI on the
+  responder − non-responder difference makes the magnitude explicit.
 
 **Answer to the posed question** — *Considering melanoma males of all sample and
 treatment types, what is the average number of B cells for responders at
@@ -147,10 +183,12 @@ time = 0?*
 **`10206.15`** (mean B-cell count over the n=485 qualifying samples), computed by
 `analysis/questions.py::avg_bcells_melanoma_male_responders_at_baseline`.
 
-The full overarching design and rationale live in
-[`docs/superpowers/specs/2026-07-15-teiko-immune-analysis-design.md`](docs/superpowers/specs/2026-07-15-teiko-immune-analysis-design.md).
-
 ### Dashboard
 
-<!-- TODO: Streamlit Community Cloud URL once deployed -->
-`https://<app>.streamlit.app`
+**Live dashboard:** https://goel-teiko-takehome-dauceseepmxvm8mmxqvbiv.streamlit.app/
+
+The dashboard is deployed on Streamlit Community Cloud (main file
+`dashboard/app.py`). It self-builds the SQLite database from the committed
+`cell-count.csv` on first load, so no separate data step is needed. When
+deploying, select **Python 3.11** in the app's advanced settings — newer Python
+versions currently lack prebuilt wheels for some dependencies.
