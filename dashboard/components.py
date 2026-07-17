@@ -1,5 +1,6 @@
 """Shared dashboard presentation helpers: palette, plot config, KPI tiles,
 dataframe styling, and the plain-language findings summary."""
+import pandas as pd
 import plotly.express as px
 import streamlit as st
 
@@ -20,12 +21,48 @@ def kpi_row(items):
         col.metric(label, value)
 
 
-def style_comparison(df):
-    """Style the Part 3 statistics table: highlight significant_primary rows."""
+def format_stats_table(comparison):
+    """Paper-quality per-population display table from a compare_responders result."""
+    df = comparison
+    return pd.DataFrame({
+        "Population": df["population"].values,
+        "Δ resp−non (pp)": df["mean_diff"].round(2).values,
+        "95% CI (pp)": [f"[{lo:.2f}, {hi:.2f}]"
+                        for lo, hi in zip(df["boot_ci_low"], df["boot_ci_high"])],
+        "Mixed p": df["mixed_p"].round(4).values,
+        "FDR q": df["q_mixed"].round(4).values,
+        "MWU q": df["q_mw"].round(4).values,
+        "Effect size": df["rank_biserial"].round(3).values,
+        "Significant": df["significant_primary"].map({True: "yes", False: "no"}).values,
+        "Concordant": df["concordant"].map({True: "yes", False: "no"}).values,
+    })
+
+
+def style_stats_table(display_df):
+    """Highlight rows that are significant (Significant == 'yes')."""
     def _highlight(row):
-        color = "background-color: #FFF3CD" if row.get("significant_primary") else ""
+        color = "background-color: #FFF3CD" if row.get("Significant") == "yes" else ""
         return [color] * len(row)
-    return df.style.apply(_highlight, axis=1).format(precision=3)
+    return display_df.style.apply(_highlight, axis=1)
+
+
+def subset_coverage(metadata):
+    """Baseline (t=0) PBMC subset sizes per condition x treatment, flagging the
+    degenerate subsets (no responder/non-responder label)."""
+    base = metadata[(metadata["sample_type"] == "PBMC") & (metadata["time"] == 0)]
+    rows = []
+    for (condition, treatment), grp in base.groupby(["condition", "treatment"]):
+        labelled = int(grp["response"].isin(["yes", "no"]).sum())
+        rows.append({
+            "condition": condition,
+            "treatment": treatment,
+            "samples": len(grp),
+            "responder_labelled": labelled,
+            "degenerate": labelled == 0,
+        })
+    return (pd.DataFrame(rows)
+            .sort_values(["condition", "treatment"])
+            .reset_index(drop=True))
 
 
 def finding_summary(comparison, alpha=0.05):

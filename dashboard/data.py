@@ -15,6 +15,7 @@ from analysis.comparison import (
 )
 from analysis.subsets import baseline_subset
 from analysis.questions import avg_bcells_melanoma_male_responders_at_baseline
+from dashboard.components import subset_coverage
 
 _META_QUERY = """
 SELECT sa.sample_id                 AS sample,
@@ -56,11 +57,6 @@ def load_frequencies():
 
 
 @st.cache_data
-def load_frequencies_annotated():
-    return load_frequencies().merge(load_sample_metadata(), on="sample", how="left")
-
-
-@st.cache_data
 def load_dataset_summary():
     m = load_sample_metadata()
     return {
@@ -96,3 +92,8 @@ def load_baseline(condition, treatment, sample_type):
 @st.cache_data
 def load_final_answer():
     return avg_bcells_melanoma_male_responders_at_baseline(get_connection())
+
+
+@st.cache_data
+def load_subset_coverage():
+    return subset_coverage(load_sample_metadata())
