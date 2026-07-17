@@ -101,32 +101,62 @@ def mannwhitney_by_population(cohort, populations=POPULATIONS):
     return pd.DataFrame(rows)
 
 
+_RESPONSE_TERM = "response[T.yes]"
+
+
+def _fit_population_effect(d, formula):
+    """Estimate the responder effect for one population.
+
+    Primary: linear mixed model with a per-subject random intercept. When the
+    random-effect variance collapses to ~0 the covariance matrix inverted during
+    the solver's gradient step becomes near-singular, and whether numpy's LAPACK
+    backend raises ``LinAlgError`` on it is platform-dependent (it does not on
+    macOS/Accelerate but does on some Linux/OpenBLAS builds — e.g. Streamlit
+    Cloud and CI). In that limit the mixed model reduces to ordinary least
+    squares, so we fall back to OLS (reporting ``group_var`` as 0) rather than
+    crash. Returns (coef, ci_low, ci_high, p, group_var).
+
+    Suppresses the two benign diagnostics that fire as the variance collapses
+    (ConvergenceWarning and the "Random effects covariance is singular"
+    UserWarning).
+    """
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", ConvergenceWarning)
+        warnings.filterwarnings(
+            "ignore", message="Random effects covariance is singular")
+        try:
+            fit = smf.mixedlm(formula, d, groups=d["subject_id"]).fit(method="lbfgs")
+            ci = fit.conf_int()
+            return (float(fit.params[_RESPONSE_TERM]),
+                    float(ci.loc[_RESPONSE_TERM, 0]),
+                    float(ci.loc[_RESPONSE_TERM, 1]),
+                    float(fit.pvalues[_RESPONSE_TERM]),
+                    float(fit.cov_re.iloc[0, 0]))
+        except (np.linalg.LinAlgError, ValueError):
+            ols = smf.ols(formula, d).fit()
+            ci = ols.conf_int()
+            return (float(ols.params[_RESPONSE_TERM]),
+                    float(ci.loc[_RESPONSE_TERM, 0]),
+                    float(ci.loc[_RESPONSE_TERM, 1]),
+                    float(ols.pvalues[_RESPONSE_TERM]),
+                    0.0)
+
+
 def mixedlm_by_population(cohort, populations=POPULATIONS):
-    """Linear mixed model per population: percentage ~ response (+ time),
-    random intercept per subject. Suppresses the two benign diagnostics that
-    fire when the random-effect variance collapses to ~0 (ConvergenceWarning and
-    the "Random effects covariance is singular" UserWarning) and records the
-    random-effect variance (group_var)."""
+    """Per-population responder effect via a mixed-effects model (OLS fallback).
+
+    `percentage ~ response (+ time)`, random intercept per subject. Records the
+    random-effect variance (group_var). See `_fit_population_effect` for the
+    fallback behaviour when the random-effect covariance is singular."""
     rows = []
     for pop in populations:
         d = cohort[cohort["population"] == pop]
         formula = "percentage ~ response"
         if d["time"].nunique() > 1:
             formula += " + C(time)"
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore", ConvergenceWarning)
-            warnings.filterwarnings(
-                "ignore", message="Random effects covariance is singular")
-            model = smf.mixedlm(formula, d, groups=d["subject_id"])
-            fit = model.fit(method="lbfgs")
-        term = "response[T.yes]"
-        ci = fit.conf_int()
-        rows.append(dict(population=pop,
-                         coef=float(fit.params[term]),
-                         ci_low=float(ci.loc[term, 0]),
-                         ci_high=float(ci.loc[term, 1]),
-                         mixed_p=float(fit.pvalues[term]),
-                         group_var=float(fit.cov_re.iloc[0, 0])))
+        coef, ci_low, ci_high, mixed_p, group_var = _fit_population_effect(d, formula)
+        rows.append(dict(population=pop, coef=coef, ci_low=ci_low,
+                         ci_high=ci_high, mixed_p=mixed_p, group_var=group_var))
     return pd.DataFrame(rows)
 
 

@@ -28,6 +28,26 @@ def _synthetic_cohort(effect=5.0, seed=0, n_per=40):
     return pd.DataFrame(rows)
 
 
+def test_mixedlm_falls_back_to_ols_on_linalg_error(monkeypatch):
+    """On some LAPACK backends the near-singular random-effect covariance makes
+    the mixed-model solver raise LinAlgError (seen on Linux/OpenBLAS but not
+    macOS/Accelerate). mixedlm_by_population must fall back to OLS — the exact
+    limit when the RE variance is 0 — rather than crash."""
+    from analysis import comparison
+
+    class _Boom:
+        def fit(self, *args, **kwargs):
+            raise np.linalg.LinAlgError("Singular matrix")
+
+    monkeypatch.setattr(comparison.smf, "mixedlm",
+                        lambda *args, **kwargs: _Boom())
+    res = comparison.mixedlm_by_population(_synthetic_cohort(effect=5.0), ["A", "B"])
+    a = res[res.population == "A"].iloc[0]
+    assert np.isfinite(a["coef"]) and np.isfinite(a["mixed_p"])
+    assert a["group_var"] == 0.0          # RE dropped in the OLS fallback
+    assert abs(a["coef"] - 5.0) < 1.5     # OLS still recovers the planted effect
+
+
 def test_benjamini_hochberg_known_values():
     q = benjamini_hochberg([0.01, 0.02, 0.03, 0.04, 0.05])
     # BH: q_i = p_i * n / rank, then cumulative-min from the top.
